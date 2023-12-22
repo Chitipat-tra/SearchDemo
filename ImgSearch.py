@@ -7,6 +7,7 @@ from PIL import Image
 from io import BytesIO
 from google.oauth2 import service_account
 import google.auth.transport.requests
+from google.cloud import discoveryengine_v1beta
 
 import vertexai
 from vertexai.preview.generative_models import GenerativeModel, Part
@@ -22,9 +23,9 @@ AUTOCOMPLETE_ENDPOINT = f"https://discoveryengine.googleapis.com/v1beta/projects
 
 # Function to create credentials
 def get_credentials():
-    credentials = service_account.Credentials.from_service_account_file(
-        './dvt-sg-vertex-ai-981ab18c1d48.json', scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    credentials, project = google.auth.default()
     return credentials
+
 
 @st.cache_data
 def get_search_results(query, offset=0, page_size=50):
@@ -78,6 +79,7 @@ def generate_text_from_image(image_data):
         ]
     )
     return response.text
+
 
 def main():
     st.title("Image Search Application")
