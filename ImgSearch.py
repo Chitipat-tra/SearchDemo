@@ -14,11 +14,6 @@ from google.protobuf.struct_pb2 import Struct
 # Constants for the API calls
 PROJECT_ID = "721867696604"
 DATA_STORE_ID = "villa-test-data-real_1702636375671"
-AUTOCOMPLETE_MODEL = (
-    "document-completable"  # Securely manage and store the access token
-)
-SEARCH_ENDPOINT = f"https://discoveryengine.googleapis.com/v1alpha/projects/{PROJECT_ID}/locations/global/collections/default_collection/dataStores/{DATA_STORE_ID}/servingConfigs/default_search:search"
-AUTOCOMPLETE_ENDPOINT = f"https://discoveryengine.googleapis.com/v1beta/projects/{PROJECT_ID}/locations/global/collections/default_collection/dataStores/{DATA_STORE_ID}:completeQuery"
 
 
 @st.cache_resource
@@ -107,8 +102,7 @@ def main():
         match_results = [
             res
             for res in all_results
-            if res.document.struct_data.get("content_en", "").lower().strip()
-            == query.lower().strip()
+            if res.document.struct_data.get("content_en", "").lower().strip()== query.lower().strip()
             or res.document.struct_data.get("content_th", "").strip() == query.strip()
         ]
         non_match_results = [res for res in all_results if res not in match_results]

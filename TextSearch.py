@@ -3,60 +3,52 @@ import requests
 import pandas as pd
 import json
 from streamlit_searchbox import st_searchbox
-from google.oauth2 import service_account
-import google.auth.transport.requests
+
+from google.cloud import discoveryengine_v1alpha
+from google.protobuf.json_format import MessageToDict
+from google.protobuf.struct_pb2 import Struct
 
 
 # Constants for the API calls
 PROJECT_ID = "721867696604"
 DATA_STORE_ID = "villa-test-data-real_1702636375671"
-AUTOCOMPLETE_MODEL = 'document-completable' # Securely manage and store the access token
-SEARCH_ENDPOINT = f"https://discoveryengine.googleapis.com/v1alpha/projects/{PROJECT_ID}/locations/global/collections/default_collection/dataStores/{DATA_STORE_ID}/servingConfigs/default_search:search"
-AUTOCOMPLETE_ENDPOINT = f"https://discoveryengine.googleapis.com/v1beta/projects/{PROJECT_ID}/locations/global/collections/default_collection/dataStores/{DATA_STORE_ID}:completeQuery"
 
 
-# Function to create credentials
-def get_credentials():
-    credentials = service_account.Credentials.from_service_account_file(
-        './dvt-sg-vertex-ai-981ab18c1d48.json', scopes=["https://www.googleapis.com/auth/cloud-platform"])
-    return credentials
+@st.cache_resource
+def get_client():
+    return discoveryengine_v1alpha.SearchServiceClient()
 
-@st.cache_data
-def get_search_results(query, offset=0, page_size=50):
-    credentials = get_credentials()
-    authed_session = google.auth.transport.requests.AuthorizedSession(credentials)
 
-    data = {
-        "query": query,
-        "pageSize": page_size,
-        "offset": offset,
-        "queryExpansionSpec": {"condition": "AUTO"},
-        "spellCorrectionSpec": {"mode": "AUTO"}
-    }
+def get_search_results(query, page_token=None):
+    client = get_client()
 
-    response = authed_session.post(SEARCH_ENDPOINT, json=data)
-    return response.json()
+    # Construct the request
+    request = discoveryengine_v1alpha.SearchRequest(
+        serving_config=f"projects/{PROJECT_ID}/locations/global/collections/default_collection/dataStores/{DATA_STORE_ID}/servingConfigs/default_search:search",
+        query=query,
+        page_token=page_token,
+        query_expansion_spec=discoveryengine_v1alpha.SearchRequest.QueryExpansionSpec(
+            condition=discoveryengine_v1alpha.SearchRequest.QueryExpansionSpec.Condition.AUTO
+        ),
+        spell_correction_spec=discoveryengine_v1alpha.SearchRequest.SpellCorrectionSpec(
+            mode=discoveryengine_v1alpha.SearchRequest.SpellCorrectionSpec.Mode.AUTO
+        ),
+    )
+
+    # Use the search method from the client, passing the request object
+    response = client.search(request=request)
+    return response
 
 
 def get_all_search_results(query):
     all_results = []
-    offset = 0
-    page_size = 100  # API's maximum limit per call
 
-    # Initial API call to get the total number of results
-    initial_response = get_search_results(query, offset, page_size)
-    total_results = initial_response.get('totalSize', 0)
-    all_results.extend(initial_response.get('results', []))
-
-    # Fetch remaining results in batches of 50
-    while len(all_results) < total_results:
-        offset += page_size
-        response = get_search_results(query, offset, page_size)
-        new_results = response.get('results', [])
-        if not new_results:
-            break  # No more results available
-        all_results.extend(new_results)
-
+    # Call the search method to get the pager
+    pager = get_search_results(query)
+    all_results.extend(pager.results)
+    while pager.next_page_token:
+        pager = get_search_results(query, pager.next_page_token)
+        all_results.extend(pager.results)
     return all_results
 
 
@@ -65,34 +57,42 @@ def get_autocomplete_suggestions(searchterm: str):
     if not searchterm:
         return []
 
-    # Create an authenticated session
-    credentials = get_credentials()
-    authed_session = google.auth.transport.requests.AuthorizedSession(credentials)
+    client = discoveryengine_v1alpha.CompletionServiceClient()
 
-    params = {"query": searchterm, "query_model": AUTOCOMPLETE_MODEL}
-
-    # Use the authenticated session to make the request
-    response = authed_session.get(AUTOCOMPLETE_ENDPOINT, params=params)
-
-    if response.status_code == 200:
-        suggestions = response.json().get('querySuggestions', [])
-        return [sugg['suggestion'] for sugg in suggestions]
+    # Construct the request
+    request = discoveryengine_v1alpha.CompleteQueryRequest(
+        data_store=f"projects/{PROJECT_ID}/locations/global/collections/default_collection/dataStores/{DATA_STORE_ID}",
+        query=searchterm,
+        query_model="document-completable",
+    )
+    # Use the search method from the client, passing the request object
+    response = client.complete_query(request=request)
+    if hasattr(response, 'query_suggestions'):
+        return [suggestion.suggestion for suggestion in response.query_suggestions]
     else:
         return []
 
+def convert_struct_to_dict(struct_data):
+    """Convert struct_data to a dictionary."""
+    if struct_data:
+        struct = Struct()
+        struct.update(struct_data)
+        return MessageToDict(struct)
+    else:
+        return {}
+
+
 # Define the search function for st_searchbox
-def search_function(searchterm: str):
-    return get_autocomplete_suggestions(searchterm)
-
-
 
 
 def main():
     st.title('Search Demo App')
+    # print(get_autocomplete_suggestions("Sa"))
+    # st.write(get_autocomplete_suggestions("Sa"))
 
-    # Autocomplete search box
+    # # Autocomplete search box
     query = st_searchbox(
-        search_function=search_function,
+        search_function=get_autocomplete_suggestions,
         placeholder="Search ...",
         label="Search",
         key="searchboxx", 
@@ -100,62 +100,99 @@ def main():
         rerun_on_update=True  # This will trigger a rerun of the app on user input
     )
 
-    # st.write(query)
-    # st.write(get_search_results(query))
+    # # st.write(query)
+    # # st.write(get_search_results(query))
     if query:
         # Retrieve all results
-        total_results = get_all_search_results(query)
+        all_results = get_all_search_results(query)
 
         # Adjusted match condition to check for exact match disregarding capitalization
+        match_results = [
+            res
+            for res in all_results
+            if res.document.struct_data.get("content_en", "").lower().strip()== query.lower().strip()
+            or res.document.struct_data.get("content_th", "").strip() == query.strip()
+        ]
+        non_match_results = [res for res in all_results if res not in match_results]
 
-        match_results = [res for res in total_results if res['document']['structData'].get('content_en', '').lower().strip() == query.lower().strip() or res['document']['structData'].get('content_th', '').strip() == query.strip()]
-
-        non_match_results = [res for res in total_results if res not in match_results]
-  
         # Sorting results
-        match_results.sort(key=lambda x: (x['document']['structData'].get('villa_category_l3_en', ''), x['document']['structData'].get('villa_category_l2_en', '')))
-        non_match_results.sort(key=lambda x: (x['document']['structData'].get('villa_category_l3_en', ''), x['document']['structData'].get('villa_category_l2_en', '')))
+        match_results.sort(
+            key=lambda x: (
+                x.document.struct_data.get("villa_category_l3_en", ""),
+                x.document.struct_data.get("villa_category_l2_en", ""),
+            )
+        )
+        non_match_results.sort(
+            key=lambda x: (
+                x.document.struct_data.get("villa_category_l3_en", ""),
+                x.document.struct_data.get("villa_category_l2_en", ""),
+            )
+        )
 
         # Concatenate match and non-match results
         combined_results = match_results + non_match_results
-
+        # st.write(match_results)
 
         # Pagination setup
         page_size = 10
         total_pages = (len(combined_results) + page_size - 1) // page_size
-        if 'page_number' not in st.session_state:
+        if "page_number" not in st.session_state:
             st.session_state.page_number = 1
 
         offset = (st.session_state.page_number - 1) * page_size
-        paginated_results = combined_results[offset:offset + page_size]
+        paginated_results = combined_results[offset : offset + page_size]
 
+        # Displaying results
+       
         if paginated_results:
-            df = pd.DataFrame([item['document']['structData'] for item in paginated_results])
+            df = pd.DataFrame(
+                [
+                    convert_struct_to_dict(item.document.struct_data)
+                    for item in paginated_results
+                ]
+            )
             # Set a new index for the DataFrame that reflects the overall position in results
             df.index = range(1 + offset, 1 + offset + len(df))
             # Do not reset the index, so it does not become a column
             # Rename the index to display as 'Index' in the table
-            df.index.name = 'Index'
-            columns_order = ['content_en', 'content_th', 'villa_category_l3_en', 'villa_category_l2_en'] + [col for col in df.columns if col not in ['content_en', 'content_th', 'villa_category_l3_en', 'villa_category_l2_en']]
+            df.index.name = "Index"
+            columns_order = [
+                "content_en",
+                "content_th",
+                "villa_category_l3_en",
+                "villa_category_l2_en",
+            ] + [
+                col
+                for col in df.columns
+                if col
+                not in [
+                    "content_en",
+                    "content_th",
+                    "villa_category_l3_en",
+                    "villa_category_l2_en",
+                ]
+            ]
             df = df[columns_order]
             st.table(df)  # Display DataFrame as a table without resetting the index
-            st.write(f'Showing results {offset+1}-{min(offset+page_size, len(combined_results))} out of {len(combined_results)} for "{query}"')
+            st.write(
+                f'Showing results {offset+1}-{min(offset+page_size, len(combined_results))} out of {len(combined_results)} for "{query}"'
+            )
 
         # Navigation buttons below the table
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            if st.button('First'):
+            if st.button("First"):
                 st.session_state.page_number = 1
         with col2:
-            if st.button('Previous'):
+            if st.button("Previous"):
                 if st.session_state.page_number > 1:
                     st.session_state.page_number -= 1
         with col3:
-            if st.button('Next'):
+            if st.button("Next"):
                 if st.session_state.page_number < total_pages:
                     st.session_state.page_number += 1
         with col4:
-            if st.button('Last'):
+            if st.button("Last"):
                 st.session_state.page_number = total_pages
 
 if __name__ == "__main__":
