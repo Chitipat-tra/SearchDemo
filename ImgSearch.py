@@ -1,16 +1,14 @@
 import streamlit as st
-import requests
 import pandas as pd
-import json
-import base64
 from PIL import Image
 from io import BytesIO
-from google.oauth2 import service_account
-import google.auth.transport.requests
-from google.cloud import discoveryengine_v1beta
 
 import vertexai
 from vertexai.preview.generative_models import GenerativeModel, Part
+
+from google.cloud import discoveryengine_v1alpha
+from google.protobuf.json_format import MessageToDict
+from google.protobuf.struct_pb2 import Struct
 
 
 # Constants for the API calls
@@ -20,51 +18,40 @@ AUTOCOMPLETE_MODEL = 'document-completable' # Securely manage and store the acce
 SEARCH_ENDPOINT = f"https://discoveryengine.googleapis.com/v1alpha/projects/{PROJECT_ID}/locations/global/collections/default_collection/dataStores/{DATA_STORE_ID}/servingConfigs/default_search:search"
 AUTOCOMPLETE_ENDPOINT = f"https://discoveryengine.googleapis.com/v1beta/projects/{PROJECT_ID}/locations/global/collections/default_collection/dataStores/{DATA_STORE_ID}:completeQuery"
 
+@st.cache_resource
+def get_client():
+    return discoveryengine_v1alpha.SearchServiceClient()
 
-# Function to create credentials
-def get_credentials():
-    credentials, project = google.auth.default()
-    return credentials
+def get_search_results(query, page_token=None):
+    client = get_client()
 
+    # Construct the request
+    request = discoveryengine_v1alpha.SearchRequest(
+        serving_config=f'projects/{PROJECT_ID}/locations/global/collections/default_collection/dataStores/{DATA_STORE_ID}/servingConfigs/default_search:search',
+        query=query,
+        page_token=page_token,
+        query_expansion_spec=discoveryengine_v1alpha.SearchRequest.QueryExpansionSpec(
+            condition=discoveryengine_v1alpha.SearchRequest.QueryExpansionSpec.Condition.AUTO
+        ),
+        spell_correction_spec=discoveryengine_v1alpha.SearchRequest.SpellCorrectionSpec(
+            mode=discoveryengine_v1alpha.SearchRequest.SpellCorrectionSpec.Mode.AUTO
+        ),
+    )
 
-@st.cache_data
-def get_search_results(query, offset=0, page_size=50):
-    credentials = get_credentials()
-    authed_session = google.auth.transport.requests.AuthorizedSession(credentials)
-
-    data = {
-        "query": query,
-        "pageSize": page_size,
-        "offset": offset,
-        "queryExpansionSpec": {"condition": "AUTO"},
-        "spellCorrectionSpec": {"mode": "AUTO"}
-    }
-
-    response = authed_session.post(SEARCH_ENDPOINT, json=data)
-    return response.json()
+    # Use the search method from the client, passing the request object
+    response = client.search(request=request)
+    return response
 
 
 def get_all_search_results(query):
     all_results = []
-    offset = 0
-    page_size = 100  # API's maximum limit per call
 
-    # Initial API call to get the total number of results
-    initial_response = get_search_results(query, offset, page_size)
-    total_results = initial_response.get('totalSize', 0)
-    # st.write(total_results)
-
-    all_results.extend(initial_response.get('results', []))
-    # st.write(all_results)
-    # Fetch remaining results in batches of 50
-    while len(all_results) < total_results:
-        offset += page_size
-        response = get_search_results(query, offset, page_size)
-        new_results = response.get('results', [])
-        if not new_results:
-            break  # No more results available
-        all_results.extend(new_results)
-
+    # Call the search method to get the pager
+    pager = get_search_results(query)
+    all_results.extend(pager.results)
+    while pager.next_page_token:
+        pager = get_search_results(query, pager.next_page_token)
+        all_results.extend(pager.results)
     return all_results
 
 
@@ -80,7 +67,15 @@ def generate_text_from_image(image_data):
     )
     return response.text
 
-
+def convert_struct_to_dict(struct_data):
+    """Convert struct_data to a dictionary."""
+    if struct_data:
+        struct = Struct()
+        struct.update(struct_data)
+        return MessageToDict(struct)
+    else:
+        return {}
+    
 def main():
     st.title("Image Search Application")
     query=""
@@ -98,17 +93,15 @@ def main():
 
     if query:
         # Retrieve all results
-        total_results = get_all_search_results(query)
+        all_results = get_all_search_results(query)
 
         # Adjusted match condition to check for exact match disregarding capitalization
-        # st.write( total_results['document']['structData'].get('content_th', ''))
-        match_results = [res for res in total_results if res['document']['structData'].get('content_en', '').lower().strip() == query.lower().strip() or res['document']['structData'].get('content_th', '').strip() == query.strip()]
-
-        non_match_results = [res for res in total_results if res not in match_results]
+        match_results = [res for res in all_results if res.document.struct_data.get('content_en', '').lower().strip() == query.lower().strip() or res.document.struct_data.get('content_th', '').strip() == query.strip()]
+        non_match_results = [res for res in all_results if res not in match_results]
   
         # Sorting results
-        match_results.sort(key=lambda x: (x['document']['structData'].get('villa_category_l3_en', ''), x['document']['structData'].get('villa_category_l2_en', '')))
-        non_match_results.sort(key=lambda x: (x['document']['structData'].get('villa_category_l3_en', ''), x['document']['structData'].get('villa_category_l2_en', '')))
+        match_results.sort(key=lambda x: (x.document.struct_data.get('villa_category_l3_en', ''), x.document.struct_data.get('villa_category_l2_en', '')))
+        non_match_results.sort(key=lambda x: (x.document.struct_data.get('villa_category_l3_en', ''), x.document.struct_data.get('villa_category_l2_en', '')))
 
         # Concatenate match and non-match results
         combined_results = match_results + non_match_results
@@ -126,7 +119,7 @@ def main():
         # Displaying results
         # Displaying results with index
         if paginated_results:
-            df = pd.DataFrame([item['document']['structData'] for item in paginated_results])
+            df = pd.DataFrame([convert_struct_to_dict(item.document.struct_data) for item in paginated_results])
             # Set a new index for the DataFrame that reflects the overall position in results
             df.index = range(1 + offset, 1 + offset + len(df))
             # Do not reset the index, so it does not become a column
