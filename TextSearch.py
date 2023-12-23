@@ -1,7 +1,5 @@
 import streamlit as st
-import requests
 import pandas as pd
-import json
 from streamlit_searchbox import st_searchbox
 
 from google.cloud import discoveryengine_v1alpha
